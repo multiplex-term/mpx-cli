@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+# CI reads the checkout and nothing else. Pull requests run code from forks,
+# so the token they run under should not be able to write anything.
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: fmt · clippy · test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --all-features
+
+  # The bind protocol's cross-implementation vectors are generated here and
+  # vendored into the app's test bundle (MultiplexTests/Fixtures/bind-v1.json).
+  # If this example stops running, the two implementations can drift silently —
+  # which is the one failure the shared vectors exist to prevent.
+  vectors:
+    name: shared vectors still generate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo run --locked --example gen_vectors > /tmp/bind-v1.json
+      - name: vectors are non-empty JSON
+        run: |
+          test -s /tmp/bind-v1.json
+          python3 -c 'import json,sys; d=json.load(open("/tmp/bind-v1.json")); assert d, "empty vector set"'
+
+  # A release builds musl and Darwin targets that ordinary CI never touches, so
+  # a target-specific break would only surface at tag time. Compile the release
+  # matrix on every change instead, without packaging anything.
+  cross-compile:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            cross: false
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            cross: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - if: matrix.cross
+        run: cargo install cross --locked
+      - name: build
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --locked --target ${{ matrix.target }}
+          else
+            cargo build --release --locked --target ${{ matrix.target }}
+          fi

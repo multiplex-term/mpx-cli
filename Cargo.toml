@@ -1,0 +1,42 @@
+[package]
+name = "mpx"
+version = "0.1.1"
+edition = "2021"
+description = "Companion CLI for Multiplex — bind this machine to the app over QR, clipboard, or your local network"
+license = "MIT"
+repository = "https://github.com/multiplex-term/multiplex-cli"
+
+[[bin]]
+name = "mpx"
+path = "src/main.rs"
+
+[lib]
+name = "mpx"
+path = "src/lib.rs"
+
+[dependencies]
+base64 = "0.22"
+chacha20poly1305 = "0.10"
+ciborium = "0.2"
+clap = { version = "4", features = ["derive"] }
+hkdf = "0.12"
+hostname = "0.4"
+if-addrs = "0.13"
+# Already in the graph via getrandom; used directly only to catch SIGINT/
+# SIGTERM so the mDNS goodbye still goes out (see src/cancel.rs).
+libc = "0.2"
+mdns-sd = "0.11"
+qrcode = "0.14"
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+sha2 = "0.10"
+ssh-key = { version = "0.6", features = ["ed25519", "rand_core"] }
+subtle = "2"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+
+[dev-dependencies]
+serde_json = "1"
+tempfile = "3"
+
+[profile.release]
+strip = true
+lto = true
