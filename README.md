@@ -105,8 +105,7 @@ git tag v0.1.0 && git push origin v0.1.0
 `{x86_64,aarch64}-unknown-linux-musl` (static, so one Linux binary covers
 glibc distributions and Alpine) and `{x86_64,aarch64}-apple-darwin` —
 packages each with the `multiplex` alias, the README and the licence, writes
-a `SHA256SUMS`, publishes a GitHub Release into
-[`multiplex-cli-releases`](https://github.com/multiplex-term/multiplex-cli-releases),
+a `SHA256SUMS`, publishes a GitHub Release [here](https://github.com/multiplex-term/mpx-cli/releases),
 and opens a formula bump against
 [`multiplex-term/homebrew-tap`](https://github.com/multiplex-term/homebrew-tap)
 (the repo behind the `multiplex-term/tap` tap — the `homebrew-` prefix is
@@ -115,11 +114,14 @@ Homebrew's own resolution rule, not a choice).
 Re-running a tag is safe: assets are uploaded with `--clobber`, so one bad
 platform build can be fixed without minting a new version.
 
-### Why artifacts live in another repository
+### Releases before this repository was public
 
-Homebrew and `curl | sh` both need *anonymous* downloads, and release
-artifacts are large and rewritten every tag. `multiplex-cli-releases`
-carries them; it holds no source.
+Homebrew and `curl | sh` both need *anonymous* downloads, which a private
+source repository cannot serve — so v0.1.0 through v0.1.2 were published to
+[`multiplex-cli-releases`](https://github.com/multiplex-term/multiplex-cli-releases/releases),
+a repository that held nothing but the artifacts. Those three releases are
+mirrored here byte-for-byte, and the old repository keeps serving the
+download URLs it already published; it takes no new ones.
 
 ## Protocol
 
