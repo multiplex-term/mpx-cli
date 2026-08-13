@@ -1,15 +1,17 @@
 name: Release
 
 # Tag-driven. `git tag v0.1.0 && git push --tags` builds every platform,
-# publishes them as a GitHub Release in the *releases* repo, and opens the
-# tap's formula bump.
+# publishes them as a GitHub Release *here*, and opens the tap's formula bump.
 #
-# Why the artifacts land in another repo: this one holds the source and stays
-# private until the app ships, while `curl | sh` and Homebrew both need
-# anonymous downloads. `multiplex-term/multiplex-cli-releases` exists to be
-# the public half. That split is also why GITHUB_TOKEN is not enough — it is
-# scoped to this repository, so cross-repo publishing needs RELEASE_TOKEN
-# (see README's "Releasing" section for the exact scopes).
+# Artifacts used to land in `multiplex-term/multiplex-cli-releases`, the public
+# half of a then-private source repo. This repository is public, so downloads
+# are anonymous from here and that split is gone: publishing needs nothing but
+# GITHUB_TOKEN. The releases repo keeps serving the URLs it already published
+# (v0.1.0–v0.1.2, also mirrored here) and takes no new ones.
+#
+# The tap is still another repository, so bumping its formula still needs
+# RELEASE_TOKEN — which now wants write on `multiplex-term/homebrew-tap` and
+# nothing else. Whatever access it held on the releases repo can go.
 on:
   push:
     tags: ["v*"]
@@ -21,11 +23,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  ARTIFACT_REPO: multiplex-term/multiplex-cli-releases
 
-# GITHUB_TOKEN reads this repository and nothing else; every write here goes
-# to another repo under RELEASE_TOKEN. Spelling that out means a compromised
-# step cannot quietly push to this one.
+# Read-only by default, so the build matrix — the jobs that run third-party
+# toolchains over the tag's own code — cannot write anything. Only `publish`
+# raises this, to `contents: write` and only for itself.
 permissions:
   contents: read
 
@@ -160,11 +161,14 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: publish to releases repo
+    name: publish release
     needs: [resolve, build]
     runs-on: ubuntu-latest
+    # The one job that writes to this repository, and it writes exactly one
+    # thing: the release for the tag `resolve` already shape-checked.
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -186,8 +190,6 @@ jobs:
           {
             echo "\`mpx\` $TAG — the companion CLI for Multiplex."
             echo
-            echo "Source lives in the private \`multiplex-cli\` repo until the app ships; this repository exists to host the downloadable builds."
-            echo
             echo '```sh'
             echo "brew install multiplex-term/tap/mpx                        # macOS or Linux"
             echo "curl -fsSL https://multiplexterm.dev/install-mpx-cli | sh  # macOS or Linux"
@@ -197,21 +199,18 @@ jobs:
           } > NOTES.md
       - name: publish
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
           TAG: ${{ needs.resolve.outputs.tag }}
         run: |
           set -euo pipefail
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::error::RELEASE_TOKEN is not set — see the Releasing section of README.md"
-            exit 1
-          fi
           # Idempotent: a re-run replaces the assets rather than failing, so a
           # single bad platform build can be fixed without minting a new tag.
-          if gh release view "$TAG" --repo "$ARTIFACT_REPO" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/* --repo "$ARTIFACT_REPO" --clobber
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --repo "$REPO" --clobber
           else
             gh release create "$TAG" dist/* \
-              --repo "$ARTIFACT_REPO" \
+              --repo "$REPO" \
               --title "mpx $TAG" \
               --notes-file NOTES.md
           fi
@@ -235,10 +234,12 @@ jobs:
           path: tap
           # checkout leaves the token in tap/.git/config unless told not to,
           # and the very next step runs bump.py — code from that repository.
-          # RELEASE_TOKEN can also write the public releases repo, so a
-          # compromised tap could read the credential out of the checkout it
-          # was handed and replace published release assets. The token now
-          # appears only in the push step, after tap code has already run.
+          # A tap-scoped RELEASE_TOKEN can still push straight to the tap's
+          # main, which is the branch every `brew install` resolves and the
+          # reason the bump goes through a PR at all — so a compromised tap
+          # reading the credential out of the checkout it was handed would
+          # skip its own review gate. The token now appears only in the push
+          # step, after tap code has already run.
           persist-credentials: false
       - name: checksums
         # Recomputed rather than carried over: SHA256SUMS is written inside
@@ -292,4 +293,4 @@ jobs:
           # reaches anyone.
           gh pr create --fill --base main \
             --title "mpx $VERSION" \
-            --body "Automated bump from multiplex-cli $TAG. Checksums come from that release's SHA256SUMS."
+            --body "Automated bump from mpx-cli $TAG. Checksums come from that release's SHA256SUMS."
