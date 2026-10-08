@@ -137,7 +137,7 @@ pub fn live_bridges(dir: &Path) -> Vec<LiveBridge> {
             })
         })
         .collect();
-    bridges.sort_by(|a, b| b.started_ms.cmp(&a.started_ms));
+    bridges.sort_by_key(|bridge| std::cmp::Reverse(bridge.started_ms));
     bridges
 }
 
