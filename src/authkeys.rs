@@ -187,7 +187,7 @@ pub fn remove_marked(
     Ok(removed)
 }
 
-fn write_atomically(path: &Path, content: &str) -> std::io::Result<()> {
+pub(crate) fn write_atomically(path: &Path, content: &str) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     if !dir.exists() {
         fs::create_dir_all(dir)?;
@@ -223,7 +223,7 @@ fn write_atomically(path: &Path, content: &str) -> std::io::Result<()> {
 /// O_EXCL is what makes it safe to use a predictable name: a symlink planted
 /// at that path makes the create fail rather than redirect the write.
 #[cfg(unix)]
-fn create_private(path: &Path) -> std::io::Result<fs::File> {
+pub(crate) fn create_private(path: &Path) -> std::io::Result<fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     fs::OpenOptions::new()
         .write(true)
@@ -233,7 +233,7 @@ fn create_private(path: &Path) -> std::io::Result<fs::File> {
 }
 
 #[cfg(not(unix))]
-fn create_private(path: &Path) -> std::io::Result<fs::File> {
+pub(crate) fn create_private(path: &Path) -> std::io::Result<fs::File> {
     fs::OpenOptions::new()
         .write(true)
         .create_new(true)

@@ -1,0 +1,17 @@
+{
+  "name": "multiplex-term",
+  "owner": {
+    "name": "Multiplex",
+    "url": "https://multiplexterm.dev"
+  },
+  "description": "Claude Code plugins for Multiplex, the spatial SSH terminal",
+  "plugins": [
+    {
+      "name": "multiplex",
+      "source": "./plugin",
+      "description": "Drive the browser in the Multiplex app (Vision Pro / iPad / iPhone) from this machine with `mpx browser`.",
+      "category": "development",
+      "tags": ["browser", "multiplex", "visionos", "ipad", "ssh"]
+    }
+  ]
+}

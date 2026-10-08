@@ -10,8 +10,9 @@
 use clap::{Args, Parser, Subcommand};
 use mpx::server::{BindOutcome, OfferRecord, ServerEvent, SessionConfig};
 use mpx::util::{self, device_slug, hex_decode};
-use mpx::{authkeys, cancel, clip, hostinfo, payload, qr, server};
+use mpx::{authkeys, bridge, browser, cancel, clip, hostinfo, payload, qr, server, skill};
 use rand_core::{OsRng, RngCore};
+use serde_json::{json, Value};
 use ssh_key::{Algorithm, PrivateKey};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
@@ -37,6 +38,173 @@ enum Command {
     Bind(BindArgs),
     /// List or remove keys mpx enrolled in authorized_keys.
     Unbind(UnbindArgs),
+    /// Drive the browser in the Multiplex app on your device — for agents.
+    /// `mpx skill install` teaches an agent how.
+    Browser(BrowserArgs),
+    /// Install or print the `multiplex` agent skill.
+    Skill(SkillArgs),
+    /// Started by the Multiplex app over SSH; serves `mpx browser` here.
+    #[command(hide = true)]
+    Bridge(BridgeArgs),
+}
+
+#[derive(Args)]
+struct BridgeArgs {
+    /// The device's display name (the app passes its own).
+    #[arg(long)]
+    device: String,
+    /// The device's install id (hex) — keeps two devices with the same
+    /// name (iOS reports a generic "iPad") on separate sockets.
+    #[arg(long)]
+    id: Option<String>,
+}
+
+#[derive(Args)]
+struct BrowserArgs {
+    /// Device to use when several are connected (name substring or slug).
+    /// Default: $MPX_BROWSER_DEVICE, else the most recently connected.
+    #[arg(long, global = true)]
+    device: Option<String>,
+    /// Tab to act on (t1, t2, …). Default: the tab you used last.
+    #[arg(long, global = true)]
+    tab: Option<String>,
+    /// Print the raw JSON result.
+    #[arg(long, global = true)]
+    json: bool,
+    /// Seconds to wait for the app.
+    #[arg(long, global = true, default_value_t = 60)]
+    timeout: u64,
+    #[command(subcommand)]
+    action: BrowserAction,
+}
+
+#[derive(Subcommand)]
+enum BrowserAction {
+    /// Connected devices and the tabs you own on each.
+    Status,
+    /// Your tabs on the chosen device.
+    Tabs,
+    /// Load a URL in your tab (opens one beside your terminal if needed).
+    Open {
+        url: String,
+        /// Open another tab instead of reusing yours.
+        #[arg(long)]
+        new_tab: bool,
+        /// Bring the tab to the front (takes the user's focus).
+        #[arg(long)]
+        focus: bool,
+        /// tmux session to dock beside (default: the one you run in).
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// Load a URL in the current tab.
+    Navigate {
+        url: String,
+    },
+    Back,
+    Reload,
+    /// Bring the tab to the front on the user's screen.
+    Show,
+    Close,
+    /// The page as an outline with [ref=eN] handles.
+    Snapshot {
+        /// Lift the length cap.
+        #[arg(long)]
+        full: bool,
+    },
+    Click {
+        #[arg(value_name = "REF")]
+        reference: String,
+    },
+    /// Replace a field's value.
+    Fill {
+        #[arg(value_name = "REF")]
+        reference: String,
+        text: String,
+        /// Press Enter afterwards.
+        #[arg(long)]
+        submit: bool,
+    },
+    /// Insert text at the focused element.
+    Type {
+        text: String,
+    },
+    /// Send a key (Enter, Tab, Escape, Backspace, ArrowDown, …).
+    Press {
+        key: String,
+    },
+    /// Choose an <option> by value or label.
+    Select {
+        #[arg(value_name = "REF")]
+        reference: String,
+        value: String,
+    },
+    /// Scroll an element into view, or the page by --by px.
+    Scroll {
+        #[arg(value_name = "REF")]
+        reference: Option<String>,
+        #[arg(long, allow_hyphen_values = true)]
+        by: Option<i64>,
+    },
+    /// Wait until text or a selector appears.
+    Wait {
+        #[arg(long)]
+        text: Option<String>,
+        #[arg(long)]
+        selector: Option<String>,
+    },
+    /// Run JavaScript in the page; prints the result.
+    Eval {
+        js: String,
+    },
+    /// Console messages and uncaught errors.
+    Console {
+        #[arg(long)]
+        clear: bool,
+    },
+    /// Make more of this machine's localhost ports reachable from your tabs
+    /// (an API or socket the page uses besides the one it was opened on).
+    Forward {
+        #[arg(required = true)]
+        ports: Vec<u16>,
+        /// Admit requests without the tab's credentials too (a page on one
+        /// port fetching another without `credentials`). Any app on the
+        /// device can then reach these ports while the tab is open — tell
+        /// the user. Forwarding again without --open restores the check.
+        #[arg(long)]
+        open: bool,
+    },
+    /// What WebKit is doing for the tab right now (scene/app state, timer
+    /// and frame health) — for measuring background behaviour.
+    #[command(hide = true)]
+    Probe,
+    /// PNG of the visible page.
+    Screenshot {
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+    },
+}
+
+#[derive(Args)]
+struct SkillArgs {
+    #[command(subcommand)]
+    action: SkillAction,
+}
+
+#[derive(Subcommand)]
+enum SkillAction {
+    /// Write the skill where an agent looks for it.
+    Install {
+        /// Agent to install for: claude or codex.
+        #[arg(long, default_value = "claude")]
+        agent: String,
+        /// Skills directory to write into instead (the skill lands in
+        /// <DIR>/multiplex/SKILL.md).
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+    /// Print the skill to stdout.
+    Print,
 }
 
 #[derive(Args)]
@@ -113,10 +281,19 @@ struct UnbindArgs {
 }
 
 fn main() {
+    // A closed pipe (`mpx browser status | head -1`) ends the CLI quietly,
+    // as it does any Unix filter — Rust's default turns it into a panic.
+    // SAFETY: restoring the default disposition before any thread starts.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let cli = Cli::parse();
     let code = match cli.command {
         Command::Bind(args) => bind(args),
         Command::Unbind(args) => unbind(args),
+        Command::Browser(args) => browser_command(args),
+        Command::Skill(args) => skill_command(args),
+        Command::Bridge(args) => bridge_command(args),
     };
     std::process::exit(code);
 }
@@ -639,13 +816,212 @@ fn spaced_digits(pin: &str) -> String {
 }
 
 fn random_id8() -> String {
-    let mut bytes = [0u8; 4];
-    OsRng.fill_bytes(&mut bytes);
-    util::hex(&bytes)
+    util::random_hex(4)
 }
 
 fn test_env_bytes<const N: usize>(var: &str) -> Option<[u8; N]> {
     let value = std::env::var(var).ok()?;
     let bytes = hex_decode(&value)?;
     bytes.as_slice().try_into().ok()
+}
+
+fn bridge_command(args: BridgeArgs) -> i32 {
+    use std::io::IsTerminal;
+    if std::io::stdin().is_terminal() {
+        eprintln!(
+            "mpx bridge is started by the Multiplex app over SSH — agents use `mpx browser`."
+        );
+        return 2;
+    }
+    let runtime_dir = match mpx::runtime::runtime_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            eprintln!("mpx bridge: {e}");
+            return 1;
+        }
+    };
+    bridge::run(
+        bridge::BridgeConfig {
+            device: args.device,
+            id: args.id,
+            runtime_dir,
+        },
+        Box::new(std::io::BufReader::new(std::io::stdin())),
+        Box::new(std::io::stdout()),
+    )
+}
+
+fn skill_command(args: SkillArgs) -> i32 {
+    match args.action {
+        SkillAction::Print => {
+            print!("{}", skill::SKILL_MD);
+            0
+        }
+        SkillAction::Install { agent, dir } => {
+            let Some(dir) = dir.or_else(|| skill::default_skills_dir(&agent)) else {
+                eprintln!("mpx skill: unknown agent '{agent}' — use --agent claude|codex or --dir");
+                return 2;
+            };
+            match skill::install(&dir) {
+                Ok(path) => {
+                    util::ok(&format!("installed → {}", path.display()));
+                    0
+                }
+                Err(e) => {
+                    eprintln!("mpx skill: cannot write into {}: {e}", dir.display());
+                    1
+                }
+            }
+        }
+    }
+}
+
+/// Maps a subcommand to its wire method and params.
+fn browser_request(action: &BrowserAction) -> (&'static str, Value) {
+    match action {
+        BrowserAction::Status => unreachable!("status is answered before any request is built"),
+        BrowserAction::Tabs => ("tabs", json!({})),
+        BrowserAction::Open {
+            url,
+            new_tab,
+            focus,
+            session,
+        } => {
+            let mut params = json!({ "url": url, "newTab": new_tab, "focus": focus });
+            let anchor = session
+                .clone()
+                .map(|name| (name, "tmux"))
+                .or_else(browser::current_session);
+            if let Some((name, backend)) = anchor {
+                params["session"] = json!({ "name": name, "backend": backend });
+            }
+            ("open", params)
+        }
+        BrowserAction::Navigate { url } => ("navigate", json!({ "url": url })),
+        BrowserAction::Back => ("back", json!({})),
+        BrowserAction::Reload => ("reload", json!({})),
+        BrowserAction::Show => ("show", json!({})),
+        BrowserAction::Close => ("close", json!({})),
+        BrowserAction::Snapshot { full } => ("snapshot", json!({ "full": full })),
+        BrowserAction::Click { reference } => ("click", json!({ "ref": reference })),
+        BrowserAction::Fill {
+            reference,
+            text,
+            submit,
+        } => (
+            "fill",
+            json!({ "ref": reference, "text": text, "submit": submit }),
+        ),
+        BrowserAction::Type { text } => ("type", json!({ "text": text })),
+        BrowserAction::Press { key } => ("press", json!({ "key": key })),
+        BrowserAction::Select { reference, value } => {
+            ("select", json!({ "ref": reference, "value": value }))
+        }
+        BrowserAction::Scroll { reference, by } => {
+            ("scroll", json!({ "ref": reference, "by": by }))
+        }
+        BrowserAction::Wait { text, selector } => {
+            ("wait", json!({ "text": text, "selector": selector }))
+        }
+        BrowserAction::Eval { js } => ("eval", json!({ "js": js })),
+        BrowserAction::Console { clear } => ("console", json!({ "clear": clear })),
+        BrowserAction::Forward { ports, open } => {
+            ("forward", json!({ "ports": ports, "open": open }))
+        }
+        BrowserAction::Probe => ("probe", json!({})),
+        BrowserAction::Screenshot { .. } => ("screenshot", json!({})),
+    }
+}
+
+fn browser_command(args: BrowserArgs) -> i32 {
+    let dir = match mpx::runtime::runtime_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            eprintln!("mpx browser: {e}");
+            return 3;
+        }
+    };
+    let bridges = browser::live_bridges(&dir);
+    let timeout = Duration::from_secs(args.timeout.max(1));
+
+    if matches!(args.action, BrowserAction::Status) {
+        if bridges.is_empty() {
+            eprintln!(
+                "mpx browser: {}",
+                browser::choose(&bridges, None).unwrap_err()
+            );
+            return 3;
+        }
+        for bridge in &bridges {
+            println!("● {} ({})", bridge.device, bridge.slug);
+            match browser::call(&bridge.socket, "tabs", json!({}), Duration::from_secs(10)) {
+                Ok(result) => {
+                    for line in browser::render("tabs", &result).lines() {
+                        println!("  {line}");
+                    }
+                }
+                Err(e) => println!("  ✗ {e}"),
+            }
+        }
+        return 0;
+    }
+
+    let wanted = args
+        .device
+        .clone()
+        .or_else(|| std::env::var("MPX_BROWSER_DEVICE").ok());
+    let (bridge, ambiguous) = match browser::choose(&bridges, wanted.as_deref()) {
+        Ok(choice) => choice,
+        Err(e) => {
+            eprintln!("mpx browser: {e}");
+            return 3;
+        }
+    };
+    if ambiguous {
+        let others: Vec<_> = bridges.iter().skip(1).map(|b| b.device.as_str()).collect();
+        eprintln!(
+            "mpx browser: using {} (also connected: {}; pick with --device)",
+            bridge.device,
+            others.join(", ")
+        );
+    }
+
+    let (method, mut params) = browser_request(&args.action);
+    if let Some(tab) = &args.tab {
+        params["tab"] = json!(tab);
+    }
+    if matches!(args.action, BrowserAction::Wait { .. }) {
+        params["timeoutMs"] = json!(timeout.as_millis() as u64);
+    }
+    let result = match browser::call(&bridge.socket, method, params, timeout) {
+        Ok(result) => result,
+        Err(e) => {
+            eprintln!("mpx browser: {e} [{}]", e.code);
+            return 1;
+        }
+    };
+    if let BrowserAction::Screenshot { out } = &args.action {
+        return match browser::save_png(&result, out.clone()) {
+            Ok(path) => {
+                if args.json {
+                    let mut shown = result.clone();
+                    shown["png"] = json!(path.display().to_string());
+                    println!("{shown}");
+                } else {
+                    println!("{}", path.display());
+                }
+                0
+            }
+            Err(e) => {
+                eprintln!("mpx browser: {e}");
+                1
+            }
+        };
+    }
+    if args.json {
+        println!("{result}");
+    } else {
+        println!("{}", browser::render(method, &result));
+    }
+    0
 }
