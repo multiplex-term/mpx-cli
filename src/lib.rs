@@ -13,11 +13,15 @@
 
 pub mod announce;
 pub mod authkeys;
+pub mod bridge;
+pub mod browser;
 pub mod cancel;
 pub mod clip;
 pub mod frame;
 pub mod hostinfo;
 pub mod payload;
 pub mod qr;
+pub mod runtime;
 pub mod server;
+pub mod skill;
 pub mod util;

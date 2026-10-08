@@ -21,6 +21,14 @@ pub fn hex(data: &[u8]) -> String {
     data.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// `bytes` random bytes from the OS, as lowercase hex.
+pub fn random_hex(bytes: usize) -> String {
+    use rand_core::RngCore as _;
+    let mut buffer = vec![0u8; bytes];
+    rand_core::OsRng.fill_bytes(&mut buffer);
+    hex(&buffer)
+}
+
 /// Decodes lowercase or uppercase hex, rejecting anything else.
 ///
 /// Deliberately byte-oriented: slicing the `&str` at every second *byte*
@@ -34,7 +42,9 @@ pub fn hex_decode(s: &str) -> Option<Vec<u8>> {
         return None;
     }
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let hi = char::from(pair[0]).to_digit(16)?;
             let lo = char::from(pair[1]).to_digit(16)?;

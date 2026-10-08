@@ -1,0 +1,14 @@
+{
+  "name": "multiplex",
+  "displayName": "Multiplex",
+  "version": "0.1.2",
+  "description": "Teaches Claude to drive the browser in the Multiplex app — open your dev server on the user's Vision Pro / iPad / iPhone, read it as an outline, click, fill, run JavaScript, read the console, take screenshots — through `mpx browser`. Needs the mpx CLI on this machine.",
+  "author": {
+    "name": "Multiplex",
+    "url": "https://multiplexterm.dev"
+  },
+  "homepage": "https://multiplexterm.dev",
+  "repository": "https://github.com/multiplex-term/mpx-cli",
+  "license": "MIT",
+  "keywords": ["multiplex", "browser", "mpx", "visionos", "ipad", "webkit"]
+}

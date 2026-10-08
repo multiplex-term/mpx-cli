@@ -80,6 +80,43 @@ If Multiplex reports a successful bind while this terminal still sits at
 `waiting for Multiplex…`, you did not bind this machine. Press Ctrl-C, delete
 the host that appeared in the app, and bind by QR instead.
 
+## Agent browser
+
+With **Host Settings ▸ Agent browser** on in Multiplex, the app runs
+`mpx bridge` on this machine over its own SSH connection, and agents here
+can drive web pages on your device:
+
+```
+$ mpx browser open localhost:5173     # docks a ⌗ tab beside your terminal
+t1  http://devbox:5173/  My App
+$ mpx browser snapshot                # outline with [ref=eN] handles
+$ mpx browser click e4
+$ mpx browser screenshot              # prints a PNG path
+```
+
+With several devices connected (an iPad and a Vision Pro, say), each runs
+its own bridge and keeps its own tabs; `mpx browser status` lists them, and
+`--device <name or slug>` (or `MPX_BROWSER_DEVICE`) picks one — otherwise
+the most recently connected wins. iOS reports generic device names, so
+slugs carry a per-install id (`ipad-3f2a9c1e`).
+
+`mpx skill install` (or `--agent codex`) writes the `multiplex` skill that
+teaches an agent the commands and their limits; `mpx skill print` shows it.
+Claude Code users can take the same skill as a plugin, which updates with
+new releases:
+
+```
+/plugin marketplace add multiplex-term/mpx-cli
+/plugin install multiplex@multiplex-term
+```
+
+The bridge listens only on a unix socket in `~/.mpx/run` (mode 0700, every
+ancestor owned by you or root) — no TCP port, no sshd forwarding — and both
+ends check the peer's uid, so only this user's processes can reach it. It
+exits when the app's connection ends. Screenshots land in `~/.mpx/shots`
+(0600) unless you pass `-o`. Agent tabs keep their own cookies,
+reach the internet and this machine only, and cannot see your own tabs.
+
 ## Install
 
 ```sh
@@ -97,6 +134,7 @@ Tag-driven, from this repository:
 
 ```sh
 # 1. bump Cargo.toml's version (the workflow refuses a tag that disagrees)
+#    and plugin/.claude-plugin/plugin.json's to match (a test enforces it)
 # 2. commit, then:
 git tag v0.1.0 && git push origin v0.1.0
 ```
